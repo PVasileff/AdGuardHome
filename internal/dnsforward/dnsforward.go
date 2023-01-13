@@ -82,6 +82,9 @@ type Server struct {
 	sysResolvers   aghnet.SystemResolvers
 	recDetector    *recursionDetector
 
+	// dns64Prefix is the set of NAT64 prefixes used for DNS64 handling.
+	dns64Prefs []netip.Prefix
+
 	// anonymizer masks the client's IP addresses if needed.
 	anonymizer *aghnet.IPMut
 
@@ -488,9 +491,11 @@ func (s *Server) Prepare(conf *ServerConfig) (err error) {
 		return fmt.Errorf("preparing access: %w", err)
 	}
 
-	if !webRegistered && s.conf.HTTPRegister != nil {
-		webRegistered = true
-		s.registerHandlers()
+	s.registerHandlers()
+
+	err = s.setupDNS64()
+	if err != nil {
+		return fmt.Errorf("preparing DNS64: %w", err)
 	}
 
 	s.dnsProxy = &proxy.Proxy{Config: proxyConfig}
@@ -501,6 +506,46 @@ func (s *Server) Prepare(conf *ServerConfig) (err error) {
 	}
 
 	s.recDetector.clear()
+
+	return nil
+}
+
+// setupDNS64 initializes DNS64 settings.  If the DNS64 feature is enabled and
+// no prefixes are configured, the default Well-Known Prefix is used, just like
+// Section 5.2 of RFC 6147 prescribes.
+func (s *Server) setupDNS64() (err error) {
+	if !s.conf.UseDNS64 {
+		return nil
+	}
+
+	l := len(s.conf.DNS64Prefixes)
+	var prefs []netip.Prefix
+	if l == 0 {
+		s.dns64Prefs = []netip.Prefix{dns64WellKnownPref}
+
+		return nil
+	}
+
+	prefs = make([]netip.Prefix, 0, l)
+	for _, pref := range s.conf.DNS64Prefixes {
+		var p netip.Prefix
+		p, err = netip.ParsePrefix(pref)
+		if err != nil {
+			return err
+		}
+
+		if !p.Addr().Is6() {
+			return fmt.Errorf("prefix %q is not an IPv6 prefix", pref)
+		}
+
+		if p.Bits() > maxNAT64PrefixBitLen {
+			return fmt.Errorf("prefix %q is too long for DNS64", pref)
+		}
+
+		s.dns64Prefs = append(s.dns64Prefs, p)
+	}
+
+	s.dns64Prefs = prefs
 
 	return nil
 }
