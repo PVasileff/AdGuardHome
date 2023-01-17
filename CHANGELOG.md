@@ -19,6 +19,7 @@ and this project adheres to
 
 ### Added
 
+- DNS64 support ([#5117]).
 - The new HTTP API `PUT /control/profile/update`, that updates current user
   language and UI theme.  The format of request body is described in 
   `openapi/openapi.yaml`.
@@ -29,7 +30,8 @@ and this project adheres to
   current user's name, language and UI theme.  The format of response body is 
   described in `openapi/openapi.yaml` and `openapi/CHANGELOG.md`.
 
-[#613]: https://github.com/AdguardTeam/AdGuardHome/issues/613
+[#613]:  https://github.com/AdguardTeam/AdGuardHome/issues/613
+[#5117]: https://github.com/AdguardTeam/AdGuardHome/issues/5117
 
 
 
