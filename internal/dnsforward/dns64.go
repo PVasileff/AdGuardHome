@@ -22,14 +22,11 @@ import (
 // TODO(e.burkov):  !! deal with timeouts ?
 func (s *Server) checkDNS64(req, resp *dns.Msg) (dns64Req *dns.Msg) {
 	if len(s.dns64Prefs) == 0 {
-		log.Debug("DNS64 DISABLED")
-
 		return nil
 	}
 
 	q := req.Question[0]
 	if q.Qtype != dns.TypeAAAA || q.Qclass != dns.ClassINET {
-		log.Debug("DNS64 DOESNT SUPPORT %v %v", q.Qtype, q.Qclass)
 		// DNS64 operation for classes other than IN is undefined, and a DNS64
 		// MUST behave as though no DNS64 function is configured.
 		return nil
@@ -37,21 +34,18 @@ func (s *Server) checkDNS64(req, resp *dns.Msg) (dns64Req *dns.Msg) {
 
 	rcode := resp.Rcode
 	if rcode == dns.RcodeNameError {
-		log.Debug("DNS64 RECEIVED NXDOMAIN")
 		// A result with RCODE=3 (Name Error) is handled according to normal DNS
 		// operation (which is normally to return the error to the client).
 		return nil
 	}
 
 	if rcode == dns.RcodeSuccess {
-		log.Debug("DNS64 CHECKING ANS")
 		// If resolver receives an answer with at least one AAAA record
 		// containing an address outside any of the excluded range(s), then it
 		// by default SHOULD build an answer section for a response including
 		// only the AAAA record(s) that do not contain any of the addresses
 		// inside the excluded ranges.
 		if answers, hasAnswers := s.filterNAT64Answers(resp.Answer); hasAnswers {
-			log.Debug("DNS64 HAS ANSWERS")
 			resp.Answer = answers
 
 			return nil
@@ -128,7 +122,8 @@ func (s *Server) filterNAT64Answers(rrs []dns.RR) (filtered []dns.RR, hasAnswers
 // See https://datatracker.ietf.org/doc/html/rfc6147#section-5.1.7
 const maxDNS64SynTTL uint32 = 600
 
-// TODO(e.burkov):  !! doc
+// synthDNS64 synthesizes a DNS64 response using the original response as basis.
+// It returns true if the response was actually synthesized.
 func (s *Server) synthDNS64(origReq, origResp, resp *dns.Msg) (ok bool) {
 	if len(resp.Answer) == 0 {
 		// If there is an empty answer, then the DNS64 responds to the original
@@ -142,10 +137,10 @@ func (s *Server) synthDNS64(origReq, origResp, resp *dns.Msg) (ok bool) {
 	//
 	// Set initially to [math.MaxUint32], so that if there is no SOA record, the
 	// TTL will still be set according to the rules.
-	ttl := uint32(math.MaxUint32)
+	soaTTL := uint32(math.MaxUint32)
 	for _, rr := range resp.Ns {
 		if soa, isSOA := rr.(*dns.SOA); isSOA && soa.Hdr.Name == origReq.Question[0].Name {
-			ttl = soa.Hdr.Ttl
+			soaTTL = soa.Hdr.Ttl
 
 			break
 		}
@@ -160,26 +155,10 @@ func (s *Server) synthDNS64(origReq, origResp, resp *dns.Msg) (ok bool) {
 			continue
 		}
 
-		addr, err := netutil.IPToAddr(aResp.A, netutil.AddrFamilyIPv4)
-		if err != nil {
-			log.Error("dnsforward: bad A record: %s", err)
-
+		rr := s.synthAAAARR(aResp, soaTTL)
+		if rr == nil {
+			// The error should have already been logged.
 			return false
-		}
-
-		rr := &dns.AAAA{
-			Hdr: dns.RR_Header{
-				Name:   aResp.Hdr.Name,
-				Rrtype: dns.TypeAAAA,
-				Class:  aResp.Hdr.Class,
-				Ttl:    aResp.Hdr.Ttl,
-			},
-			AAAA: s.mapDNS64(addr).AsSlice(),
-		}
-		if rrTTL := aResp.Hdr.Ttl; ttl < rrTTL {
-			rr.Hdr.Ttl = ttl
-		} else if rrTTL > maxDNS64SynTTL {
-			rr.Hdr.Ttl = maxDNS64SynTTL
 		}
 
 		newAns = append(newAns, rr)
@@ -190,10 +169,13 @@ func (s *Server) synthDNS64(origReq, origResp, resp *dns.Msg) (ok bool) {
 	return true
 }
 
-// TODO(e.burkov):  !! doc
 const (
+	// maxNAT64PrefixBitLen is the maximum length of a NAT64 prefix in bits.
+	// See https://datatracker.ietf.org/doc/html/rfc6147#section-5.2.
 	maxNAT64PrefixBitLen = 96
-	nat64PrefixLen       = maxNAT64PrefixBitLen / 8
+
+	// nat64PrefixLen is the length of a NAT64 prefix in bytes.
+	nat64PrefixLen = maxNAT64PrefixBitLen / 8
 )
 
 // dns64WellKnownPref is the default prefix to use in an algorithmic mapping for
@@ -215,7 +197,8 @@ func (s *Server) withinDNS64OrWellKnown(ip netip.Addr) (ok bool) {
 // valid IPv4.  It panics, if there are no configured DNS64 prefixes, because
 // synthesis should not be performed unless DNS64 function enabled.
 func (s *Server) mapDNS64(ip netip.Addr) (mapped netip.Addr) {
-	// TODO(e.burkov):  !! masked?
+	// Don't mask the address here since it should have already been masked on
+	// initialization stage.
 	pref := s.dns64Prefs[0].Addr().As16()
 	ipData := ip.As4()
 	mappedData := *(*[net.IPv6len]byte)(append(pref[:nat64PrefixLen], ipData[:]...))
@@ -223,6 +206,10 @@ func (s *Server) mapDNS64(ip netip.Addr) (mapped netip.Addr) {
 	return netip.AddrFrom16(mappedData)
 }
 
+// performDNS64 processes the current state of dctx assuming that it has already
+// been tried to resolve, checks if it contains any acceptable response, and if
+// it doesn't, performs DNS64 request and the following synthesis.  It returns
+// the [resultCodeError] if there was an error set to dctx.
 func (s *Server) performDNS64(prx *proxy.Proxy, dctx *dnsContext) (rc resultCode) {
 	pctx := dctx.proxyCtx
 	req := pctx.Req
@@ -250,4 +237,43 @@ func (s *Server) performDNS64(prx *proxy.Proxy, dctx *dnsContext) (rc resultCode
 	}
 
 	return resultCodeSuccess
+}
+
+// synthDNS64 synthesizes AAAA record for the current A response using the first
+// configured DNS64 prefix and choosing the TTL of the resulting record
+// according to the value of soaTTL.  If no SOA records contained in the
+// original response, [math.MaxUint32] should be used as soaTTL.  It returns nil
+// and logs the error in case the one occurs.
+func (s *Server) synthAAAARR(aResp *dns.A, soaTTL uint32) (aaaa dns.RR) {
+	addr, err := netutil.IPToAddr(aResp.A, netutil.AddrFamilyIPv4)
+	if err != nil {
+		log.Error("dnsforward: bad A record: %s", err)
+
+		return nil
+	}
+
+	// Don't mask the address here since it should have already been masked on
+	// initialization stage.
+	pref := s.dns64Prefs[0].Addr().As16()
+	ipData := addr.As4()
+
+	rr := &dns.AAAA{
+		Hdr: dns.RR_Header{
+			Name:   aResp.Hdr.Name,
+			Rrtype: dns.TypeAAAA,
+			Class:  aResp.Hdr.Class,
+		},
+		AAAA: append(pref[:nat64PrefixLen], ipData[:]...),
+	}
+
+	switch rrTTL := aResp.Hdr.Ttl; {
+	case rrTTL > soaTTL:
+		rr.Hdr.Ttl = soaTTL
+	case rrTTL > maxDNS64SynTTL:
+		rr.Hdr.Ttl = maxDNS64SynTTL
+	default:
+		rr.Hdr.Ttl = rrTTL
+	}
+
+	return rr
 }
