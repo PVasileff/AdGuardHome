@@ -29,9 +29,9 @@ type dnsContext struct {
 	origResp *dns.Msg
 
 	// unreversedReqIP stores an IP address obtained from a PTR request if it
-	// parsed successfully and belongs to one of locally served IP ranges.  It
-	// also filled with unmapped version of the address if it's within DNS64
-	// prefixes.
+	// was parsed successfully and belongs to one of the locally served IP
+	// ranges.  It is also filled with unmapped version of the address if it's
+	// within DNS64 prefixes.
 	unreversedReqIP net.IP
 
 	// err is the error returned from a processing function.
@@ -58,7 +58,7 @@ type dnsContext struct {
 	// responseAD shows if the response had the AD bit set.
 	responseAD bool
 
-	// isLocalClient shows if client's IP address is from locally-served
+	// isLocalClient shows if client's IP address is from locally served
 	// network.
 	isLocalClient bool
 }
@@ -134,8 +134,8 @@ func (s *Server) handleDNSRequest(_ *proxy.Proxy, pctx *proxy.DNSContext) error 
 	return nil
 }
 
-// processRecursion checks the incoming request and halts its handling if s have
-// tried to resolve it recently.
+// processRecursion checks the incoming request and halts its handling by
+// answering NXDOMAIN if s has tried to resolve it recently.
 func (s *Server) processRecursion(dctx *dnsContext) (rc resultCode) {
 	pctx := dctx.proxyCtx
 
@@ -350,8 +350,8 @@ func (s *Server) makeDDRResponse(req *dns.Msg) (resp *dns.Msg) {
 	return resp
 }
 
-// processDetermineLocal determines if the client's IP address is from
-// locally-served network and saves the result into the context.
+// processDetermineLocal determines if the client's IP address is from locally
+// served network and saves the result into the context.
 func (s *Server) processDetermineLocal(dctx *dnsContext) (rc resultCode) {
 	rc = resultCodeSuccess
 
@@ -420,9 +420,11 @@ func (s *Server) processDHCPHosts(dctx *dnsContext) (rc resultCode) {
 		resp.Answer = append(resp.Answer, a)
 	case dns.TypeAAAA:
 		if len(s.dns64Prefs) > 0 {
+			// Respond with DNS64-mapped address for IPv4 host if DNS64 is
+			// enabled.
 			aaaa := &dns.AAAA{
 				Hdr:  s.hdr(req, dns.TypeAAAA),
-				AAAA: s.mapDNS64(ip).AsSlice(),
+				AAAA: s.mapDNS64(ip),
 			}
 			resp.Answer = append(resp.Answer, aaaa)
 		}
@@ -436,7 +438,7 @@ func (s *Server) processDHCPHosts(dctx *dnsContext) (rc resultCode) {
 }
 
 // processRestrictLocal responds with NXDOMAIN to PTR requests for IP addresses
-// in locally-served network from external clients.
+// in locally served network from external clients.
 func (s *Server) processRestrictLocal(dctx *dnsContext) (rc resultCode) {
 	pctx := dctx.proxyCtx
 	req := pctx.Req
@@ -466,27 +468,37 @@ func (s *Server) processRestrictLocal(dctx *dnsContext) (rc resultCode) {
 		return resultCodeSuccess
 	}
 
-	// A DNS64 MUST examine the requested address to see whether its prefix
-	// matches any of the locally configured Pref64::/n or the default
-	// Well-Known Prefix.
-	if addr, ok := netip.AddrFromSlice(ip); ok && addr.Is6() && s.withinDNS64OrWellKnown(addr) {
-		log.Debug("dnsforward: stripping %s which is within DNS64", ip)
+	if len(s.dns64Prefs) > 0 {
+		// If DNS64 is enabled, examine the requested address to see whether its
+		// prefix matches any of the locally configured exclusion prefixes or
+		// the Well-Known one.
+		//
+		// The requirement is to match any Pref64::/n used at the site, and not
+		// merely the locally configured Pref64::/n.  This is because end
+		// clients could ask for a PTR record matching an address received
+		// through a different (site-provided) DNS64.
+		var addr netip.Addr
+		addr, err = netutil.IPToAddr(ip, netutil.AddrFamilyIPv6)
+		if err == nil && (s.withinDNS64(addr) || dns64WellKnownPref.Contains(addr)) {
+			log.Debug("dnsforward: stripping %s which is within DNS64", ip)
 
-		ip = ip[nat64PrefixLen:]
+			// Strip the prefix from the address to get the original IPv4.
+			ip = ip[nat64PrefixLen:]
 
-		// Consider a DNS64-prefixed address as a locally-served one since those
-		// queries should never be sent to the global DNS.
-		dctx.unreversedReqIP = ip
+			// Treat a DNS64-prefixed address as a locally served one since
+			// those queries should never be sent to the global DNS.
+			dctx.unreversedReqIP = ip
+		}
 	}
 
 	// Restrict an access to local addresses for external clients.  We also
-	// assume that all the DHCP leases we give are locally-served or at least
+	// assume that all the DHCP leases we give are locally served or at least
 	// shouldn't be accessible externally.
 	if !s.privateNets.Contains(ip) {
 		return resultCodeSuccess
 	}
 
-	log.Debug("dnsforward: addr %s is from locally-served network", ip)
+	log.Debug("dnsforward: addr %s is from locally served network", ip)
 
 	if !dctx.isLocalClient {
 		log.Debug("dnsforward: %q requests an internal ip", pctx.Addr)
@@ -500,7 +512,7 @@ func (s *Server) processRestrictLocal(dctx *dnsContext) (rc resultCode) {
 	dctx.unreversedReqIP = ip
 
 	// There is no need to filter request from external addresses since this
-	// code is only executed when the request is for locally-served ARPA
+	// code is only executed when the request is for locally served ARPA
 	// hostname so disable redundant filters.
 	dctx.setts.ParentalEnabled = false
 	dctx.setts.SafeBrowsingEnabled = false

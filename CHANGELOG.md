@@ -19,7 +19,9 @@ and this project adheres to
 
 ### Added
 
-- DNS64 support ([#5117]).
+- DNS64 support ([#5117]).  The function may be enabled with new `use_dns64`
+  field under `dns` object in the configuration along with `dns64_prefixes`, the
+  set of exclusion prefixes to filter AAAA responses.
 - The new HTTP API `PUT /control/profile/update`, that updates current user
   language and UI theme.  The format of request body is described in 
   `openapi/openapi.yaml`.
