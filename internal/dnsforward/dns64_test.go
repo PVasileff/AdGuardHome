@@ -264,6 +264,7 @@ func TestServer_HandleDNSRequest_dns64(t *testing.T) {
 	})
 
 	s := createTestServer(t, &filtering.Config{}, ServerConfig{
+		UDPListenAddrs: []*net.UDPAddr{{}},
 		TCPListenAddrs: []*net.TCPAddr{{}},
 		UseDNS64:       true,
 	}, localUps)
