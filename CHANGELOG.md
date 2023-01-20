@@ -50,10 +50,6 @@ See also the [v0.107.22 GitHub milestone][ms-v0.107.22].
   current user's name, language, and UI theme.  The format of response body is
   described in `openapi/openapi.yaml` and `openapi/CHANGELOG.md`.
 
-[#613]:  https://github.com/AdguardTeam/AdGuardHome/issues/613
-
-
-
 ### Fixed
 
 - `AdGuardHome --update` freezing when another instance of AdGuard Home is

@@ -54,7 +54,7 @@ func newRR(t *testing.T, name string, qtype uint16, ttl uint32, val any) (rr dns
 	return rr
 }
 
-func TestServer_Server_dns64(t *testing.T) {
+func TestServer_HandleDNSRequest_dns64(t *testing.T) {
 	const (
 		ipv4Domain    = "ipv4.only."
 		ipv6Domain    = "ipv6.only."
@@ -86,10 +86,12 @@ func TestServer_Server_dns64(t *testing.T) {
 		sectionsNum
 	)
 
-	type answersMap = map[uint16][sectionsNum][]dns.RR
+	// answerMap is a convenience alias for describing the upstream response for
+	// a given question type.
+	type answerMap = map[uint16][sectionsNum][]dns.RR
 
 	pt := testutil.PanicT{}
-	newUps := func(answers answersMap) (u upstream.Upstream) {
+	newUps := func(answers answerMap) (u upstream.Upstream) {
 		return aghtest.NewUpstreamMock(func(req *dns.Msg) (resp *dns.Msg, err error) {
 			q := req.Question[0]
 			require.Contains(pt, answers, q.Qtype)
@@ -108,13 +110,13 @@ func TestServer_Server_dns64(t *testing.T) {
 	testCases := []struct {
 		name    string
 		qname   string
-		answers answersMap
+		upsAns  answerMap
 		wantAns []dns.RR
 		qtype   uint16
 	}{{
 		name:  "simple_a",
 		qname: ipv4Domain,
-		answers: answersMap{
+		upsAns: answerMap{
 			dns.TypeA: {
 				sectionAnswer: {newRR(t, ipv4Domain, dns.TypeA, 3600, someIPv4)},
 			},
@@ -134,7 +136,7 @@ func TestServer_Server_dns64(t *testing.T) {
 	}, {
 		name:  "simple_aaaa",
 		qname: ipv6Domain,
-		answers: answersMap{
+		upsAns: answerMap{
 			dns.TypeA: {},
 			dns.TypeAAAA: {
 				sectionAnswer: {newRR(t, ipv6Domain, dns.TypeAAAA, 3600, someIPv6)},
@@ -154,7 +156,7 @@ func TestServer_Server_dns64(t *testing.T) {
 	}, {
 		name:  "actual_dns64",
 		qname: ipv4Domain,
-		answers: answersMap{
+		upsAns: answerMap{
 			dns.TypeA: {
 				sectionAnswer: {newRR(t, ipv4Domain, dns.TypeA, 3600, someIPv4)},
 			},
@@ -174,7 +176,7 @@ func TestServer_Server_dns64(t *testing.T) {
 	}, {
 		name:  "actual_dns64_soattl",
 		qname: soaDomain,
-		answers: answersMap{
+		upsAns: answerMap{
 			dns.TypeA: {
 				sectionAnswer: {newRR(t, soaDomain, dns.TypeA, 3600, someIPv4)},
 			},
@@ -196,7 +198,7 @@ func TestServer_Server_dns64(t *testing.T) {
 	}, {
 		name:  "filtered",
 		qname: mappedDomain,
-		answers: answersMap{
+		upsAns: answerMap{
 			dns.TypeA: {},
 			dns.TypeAAAA: {
 				sectionAnswer: {
@@ -217,9 +219,9 @@ func TestServer_Server_dns64(t *testing.T) {
 		}},
 		qtype: dns.TypeAAAA,
 	}, {
-		name:    "ptr",
-		qname:   ptr64Domain,
-		answers: nil,
+		name:   "ptr",
+		qname:  ptr64Domain,
+		upsAns: nil,
 		wantAns: []dns.RR{&dns.PTR{
 			Hdr: dns.RR_Header{
 				Name:     ptr64Domain,
@@ -234,7 +236,7 @@ func TestServer_Server_dns64(t *testing.T) {
 	}, {
 		name:  "ptr_glob",
 		qname: ptrGlobDomain,
-		answers: answersMap{
+		upsAns: answerMap{
 			dns.TypePTR: {
 				sectionAnswer: {newRR(t, ptrGlobDomain, dns.TypePTR, 3600, globDomain)},
 			},
@@ -272,7 +274,7 @@ func TestServer_Server_dns64(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			s.conf.UpstreamConfig.Upstreams = []upstream.Upstream{newUps(tc.answers)}
+			s.conf.UpstreamConfig.Upstreams = []upstream.Upstream{newUps(tc.upsAns)}
 			startDeferStop(t, s)
 
 			req := (&dns.Msg{}).SetQuestion(tc.qname, tc.qtype)
